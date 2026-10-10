@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Binance 資産</title>
+<style>
+:root{--bg:#0f1419;--card:#1a2129;--fg:#e8edf2;--mut:#8b98a5;--acc:#f0b90b;--err:#ff6b6b;--ok:#4ade80}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;padding:12px}
+main{max-width:760px;margin:0 auto}
+h1{font-size:18px;margin:4px 0 12px}
+.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px}
+.total{font-size:30px;font-weight:700;color:var(--acc)}
+.sub{color:var(--mut);font-size:13px;margin-top:4px}
+.row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+button{background:var(--acc);color:#000;border:0;border-radius:8px;padding:8px 14px;font-weight:600;font-size:14px;cursor:pointer}
+button:disabled{opacity:.5}
+#status{font-size:13px;margin-top:8px}
+#status.err{color:var(--err)}#status.ok{color:var(--ok)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:8px 4px;text-align:right;border-bottom:1px solid #2a343e}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:500;font-size:12px}
+td small{color:var(--mut);display:block;font-size:11px}
+.chart{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.legend{flex:1;min-width:140px;font-size:13px}
+.legend div{display:flex;align-items:center;gap:6px;margin:3px 0}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.bar{height:14px;border-radius:7px;overflow:hidden;display:flex;margin-top:12px;width:100%}
+.bar span{display:block;height:100%}
+@media(max-width:480px){.total{font-size:24px}th,td{font-size:12px}}
+</style>
+</head>
+<body>
+<main>
+<h1>Binance 資産</h1>
+<div class="card">
+  <div class="row">
+    <div>
+      <div class="sub">合計(USDT換算)</div>
+      <div class="total" id="totalUsdt">---</div>
+      <div class="sub" id="totalJpy">約 --- 円</div>
+    </div>
+    <button id="refresh">更新</button>
+  </div>
+  <div class="sub" id="updated">更新時刻: ---</div>
+  <div id="status">読み込み中…</div>
+</div>
+<div class="card">
+  <div class="sub">資産の内訳</div>
+  <div class="chart">
+    <svg id="donut" width="150" height="150" viewBox="0 0 42 42" role="img" aria-label="資産配分"></svg>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="bar" id="bar"></div>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>資産</th><th>数量</th><th>利用可/ロック</th><th>評価額(USDT)</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="4" class="sub">読み込み中…</td></tr></tbody>
+  </table>
+</div>
+</main>
+<script>
+(function(){
+  var API_URL = "https://binance-assets-api.onrender.com/api/assets";
+  var JPY_URL = "https://api.binance.com/api/v3/ticker/price?symbol=USDTJPY";
+  var REFRESH_MS = 60000, TIMEOUT_MS = 45000, RETRY_MS = 15000;
+  var COLORS = ["#f0b90b","#4ade80","#60a5fa","#f472b6","#a78bfa","#fb923c","#22d3ee","#94a3b8"];
+  var $ = function(id){return document.getElementById(id)};
+  var timer = null, busy = false;
+
+  function fmt(n, d){ n = Number(n); if(!isFinite(n)) return "-";
+    return n.toLocaleString("ja-JP",{minimumFractionDigits:d,maximumFractionDigits:d}); }
+  function qty(n){ n=Number(n); if(!isFinite(n)) return "-";
+    return n.toLocaleString("ja-JP",{maximumFractionDigits:8}); }
+  function setStatus(msg, cls){ var s=$("status"); s.textContent=msg; s.className=cls||""; }
+  function esc(s){ return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]}); }
+
+  function fetchJson(url, ms){
+    var ctl = new AbortController();
+    var t = setTimeout(function(){ctl.abort()}, ms);
+    return fetch(url,{signal:ctl.signal,cache:"no-store"}).then(function(r){
+      clearTimeout(t);
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return r.json();
+    },function(e){clearTimeout(t);throw e;});
+  }
+
+  function toJst(s){
+    if(!s) return "---";
+    var d = new Date(typeof s==="number" ? (s<1e12?s*1000:s) : s);
+    if(isNaN(d)) return String(s);
+    return d.toLocaleString("ja-JP",{timeZone:"Asia/Tokyo",hour12:false}) + " JST";
+  }
+
+  function render(data, jpy){
+    var list = (data.balances||[]).map(function(b){
+      return {asset:b.asset,free:+b.free||0,locked:+b.locked||0,total:+b.total||0,value:+b.value_usdt||0};
+    }).sort(function(a,b){return b.value-a.value});
+    var total = Number(data.total_usdt);
+    if(!isFinite(total)) total = list.reduce(function(s,x){return s+x.value},0);
+    $("totalUsdt").textContent = fmt(total,2)+" USDT";
+    $("totalJpy").textContent = jpy ? "約 "+fmt(total*jpy,0)+" 円 (1 USDT = "+fmt(jpy,2)+" 円)" : "約 --- 円 (為替レート取得不可)";
+    $("updated").textContent = "更新時刻: "+toJst(data.updated_at);
+    $("rows").innerHTML = list.length ? list.map(function(x){
+      return "<tr><td>"+esc(x.asset)+"</td><td>"+qty(x.total)+"</td><td>"+qty(x.free)+"<small>"+qty(x.locked)+"</small></td><td>"+fmt(x.value,2)+"</td></tr>";
+    }).join("") : '<tr><td colspan="4" class="sub">資産がありません</td></tr>';
+    chart(list, total);
+  }
+
+  function chart(list,total){
+    var items = list.filter(function(x){return x.value>0});
+    if(items.length>7){
+      var rest = items.slice(7).reduce(function(s,x){return s+x.value},0);
+      items = items.slice(0,7).concat([{asset:"その他",value:rest}]);
+    }
+    var sum = items.reduce(function(s,x){return s+x.value},0) || 1;
+    var svg = '<circle cx="21" cy="21" r="15.915" fill="none" stroke="#2a343e" stroke-width="6"/>';
+    var off = 25, leg = "", bar = "";
+    items.forEach(function(x,i){
+      var p = x.value/sum*100, c = COLORS[i%COLORS.length];
+      svg += '<circle cx="21" cy="21" r="15.915" fill="none" stroke="'+c+'" stroke-width="6" stroke-dasharray="'+p+' '+(100-p)+'" stroke-dashoffset="'+off+'"/>';
+      off -= p;
+      leg += '<div><span class="dot" style="background:'+c+'"></span>'+esc(x.asset)+' '+fmt(p,1)+'%</div>';
+      bar += '<span style="width:'+p+'%;background:'+c+'"></span>';
+    });
+    $("donut").innerHTML = svg; $("legend").innerHTML = leg || '<span class="sub">データなし</span>'; $("bar").innerHTML = bar;
+  }
+
+  function getJpy(){
+    return fetchJson(JPY_URL, 8000).then(function(j){var p=Number(j.price);return isFinite(p)&&p>0?p:null}).catch(function(){return null});
+  }
+
+  function load(){
+    if(busy) return; busy = true;
+    clearTimeout(timer);
+    $("refresh").disabled = true;
+    setStatus("読み込み中…(APIが休止中の場合、起動に時間がかかります)");
+    Promise.all([fetchJson(API_URL, TIMEOUT_MS), getJpy()]).then(function(r){
+      render(r[0], r[1]);
+      setStatus("最終取得: "+new Date().toLocaleTimeString("ja-JP",{timeZone:"Asia/Tokyo",hour12:false})+" JST(60秒ごとに自動更新)","ok");
+      timer = setTimeout(load, REFRESH_MS);
+    }).catch(function(e){
+      setStatus("APIが応答しません("+(e&&e.name==="AbortError"?"タイムアウト":(e&&e.message)||"エラー")+")。"+(RETRY_MS/1000)+"秒後に再試行します。","err");
+      timer = setTimeout(load, RETRY_MS);
+    }).then(function(){ busy=false; $("refresh").disabled=false; });
+  }
+
+  $("refresh").addEventListener("click", load);
+  load();
+})();
+</script>
+</body>
+</html>
